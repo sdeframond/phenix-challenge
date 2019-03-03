@@ -1,4 +1,12 @@
+import java.nio.file.{Files, Paths}
+import scala.collection.JavaConverters._
+
 object Main extends App {
-  val lines = scala.io.Source.fromFile("data/reference_prod-10f2f3e6-f728-41f3-b079-43b0aa758292_20170514.data")
-  lines.getLines() foreach println
+  val directory = "data"
+  val files = Files.walk(Paths.get(directory)).iterator().asScala
+  for (f <- files.map(_.toFile).filter(_.isFile)) {
+    val lines = scala.io.Source.fromFile(f.getPath)
+    val linesCount = lines.getLines().length
+    println(s"$f : $linesCount lines")
+  }
 }
