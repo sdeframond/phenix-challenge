@@ -1,7 +1,11 @@
 import java.nio.file.{Files, Paths}
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import scala.collection.JavaConverters._
+import scala.util.matching.Regex
+import com.typesafe.scalalogging.LazyLogging
 
-object Main extends App {
+object Main extends App with LazyLogging {
   /*
     ## Assumptions
 
@@ -11,9 +15,11 @@ object Main extends App {
       - Less than 10 million tx/j
       - Store references are ordered by productId in the files
       - For a given product, its ID stays the same in any price reference file.
-          Note that this seems inconsistent with the example data : prices for a
-          given product vary wildly from one store to the next. I am assuming
-          this is because the example data is generated randomly.
+          - Note that this seems inconsistent with the example data : prices for a
+            given product vary wildly from one store to the next. I am assuming
+            this is because the example data is generated randomly.
+      - Transaction IDs are useless for us. I don't really undersytand their
+        meaning: tx with the same ID have a different time stamps and store ID...
 
     ## Goal
 
@@ -67,15 +73,21 @@ object Main extends App {
 
   */
 
-  if(args.length != 1) {
-    println("USAGE : phenix-challenge <path_to_data>")
+  if(args.length < 1) {
+    logger.error("USAGE : phenix-challenge <path_to_data> [<YYYY-MM-DD>]")
     System.exit(1)
   }
   val directory = args(0)
+  val day = if(args.length == 2) LocalDate.parse(args(1)) else LocalDate.now()
+
   val files = Files.walk(Paths.get(directory)).iterator().asScala
-  for (f <- files.map(_.toFile).filter(_.isFile)) {
-    val lines = scala.io.Source.fromFile(f.getPath)
-    val linesCount = lines.getLines().length
-    println(s"$f : $linesCount lines")
+
+  val transactionsFileName = s"transactions_${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.data"
+
+  // FIXME: Make path interoperable --SDF 2019-03-06
+  val transactionLines = scala.io.Source.fromFile(s"$directory/$transactionsFileName").getLines()
+
+  for (l <- transactionLines.take(10)) {
+    println(l)
   }
 }
