@@ -1,9 +1,41 @@
 import java.nio.file.{Files, Paths}
-import java.time.LocalDate
+import java.time.{LocalDate, LocalDateTime}
 import java.time.format.DateTimeFormatter
 import scala.collection.JavaConverters._
 import scala.util.matching.Regex
 import com.typesafe.scalalogging.LazyLogging
+
+case class Transaction
+  ( id: Int
+  , time: LocalDateTime
+  , storeId: String
+  , productId: Int
+  , quantity: Int
+  )
+
+object Transaction {
+  def parse(string: String): Either[Transaction, String] = {
+    try {
+      string match {
+        case regex(id, time, sid, pid, qty) =>
+          Left(Transaction
+            ( id.toInt
+            , LocalDateTime.parse(time, formatter)
+              , sid
+              , pid.toInt
+              , qty.toInt
+            )
+          )
+        case _ => Right(s"Failed to parse: $string")
+      }
+    } catch {
+      case e => Right(s"Failed to parse: $string, with exception: $e")
+    }
+  }
+
+  private val formatter = DateTimeFormatter.ofPattern("uuuuLLdd'T'HHmmssxxxx")
+  private val regex = raw"(\d+)\|([^\|]+)\|([^\|]+)\|(\d+)\|(\d+)".r
+}
 
 object Main extends App with LazyLogging {
   /*
@@ -74,20 +106,23 @@ object Main extends App with LazyLogging {
   */
 
   if(args.length < 1) {
-    logger.error("USAGE : phenix-challenge <path_to_data> [<YYYY-MM-DD>]")
+    logger.error("USAGE : phenix-challenge <path_to_root> [<YYYY-MM-DD>]")
     System.exit(1)
   }
-  val directory = args(0)
+  val rootDirectory = args(0)
   val day = if(args.length == 2) LocalDate.parse(args(1)) else LocalDate.now()
 
-  val files = Files.walk(Paths.get(directory)).iterator().asScala
+  val files = Files.walk(Paths.get(rootDirectory)).iterator().asScala
 
   val transactionsFileName = s"transactions_${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.data"
 
   // FIXME: Make path interoperable --SDF 2019-03-06
-  val transactionLines = scala.io.Source.fromFile(s"$directory/$transactionsFileName").getLines()
+  val transactionLines = scala.io.Source.fromFile(s"$rootDirectory/data/$transactionsFileName").getLines()
 
-  for (l <- transactionLines.take(10)) {
-    println(l)
+  for (either_t <- transactionLines.take(10).map(Transaction.parse(_))) {
+    either_t match {
+      case Left(t) => println(s"$t")
+      case Right(s) => logger.error(s); System.exit(1)
+    }
   }
 }
