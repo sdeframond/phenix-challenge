@@ -11,10 +11,12 @@ import scala.util.{Failure, Success, Try}
 case class Transaction
   ( id: Int
   , time: LocalDateTime
-  , storeId: String
+  , storeId: StoreId
   , productId: Int
   , quantity: Int
   )
+
+case class StoreId(id: String)
 
 object Transaction {
   def parse(string: String): Try[Transaction] = {
@@ -24,7 +26,7 @@ object Transaction {
           Success(Transaction
             ( id.toInt
             , LocalDateTime.parse(time, formatter)
-              , sid
+              , StoreId(sid)
               , pid.toInt
               , qty.toInt
             )
@@ -122,10 +124,18 @@ object Main extends App with LazyLogging {
   // FIXME: Make path interoperable --SDF 2019-03-06
   val transactionLines = scala.io.Source.fromFile(s"$rootDirectory/data/$transactionsFileName").getLines()
 
-  for (either_t <- transactionLines.take(10).map(Transaction.parse(_))) {
-    either_t match {
-      case Success(t) => println(s"$t") // TODO: append to relevant tmp file
-      case Failure(e) => throw e
-    }
+  // TODO : take all transactions. --SDF 2019-03-07
+  val transactions = transactionLines.take(10).map(Transaction.parse(_))
+
+  val storeTxMap = Map[StoreId, List[Transaction]]()
+  val finalMap = transactions.foldLeft(storeTxMap) {
+    case (map, Success(tx)) =>
+      map.get(tx.storeId) match {
+        case Some(it) => map + (tx.storeId -> (tx :: it))
+        case None => map + (tx.storeId -> (tx :: List()))
+      }
+    // FIXME: Handle failure case. Have a look at some monadic syntax maybe ? --SDF 2019-03-07
   }
+
+  println(s"$finalMap")
 }
