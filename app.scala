@@ -1,9 +1,12 @@
+import com.typesafe.scalalogging.LazyLogging
+
 import java.nio.file.{Files, Paths}
-import java.time.{LocalDate, LocalDateTime}
 import java.time.format.DateTimeFormatter
+import java.time.{LocalDate, LocalDateTime}
+
 import scala.collection.JavaConverters._
 import scala.util.matching.Regex
-import com.typesafe.scalalogging.LazyLogging
+import scala.util.{Failure, Success, Try}
 
 case class Transaction
   ( id: Int
@@ -14,11 +17,11 @@ case class Transaction
   )
 
 object Transaction {
-  def parse(string: String): Either[Transaction, String] = {
+  def parse(string: String): Try[Transaction] = {
     try {
       string match {
         case regex(id, time, sid, pid, qty) =>
-          Left(Transaction
+          Success(Transaction
             ( id.toInt
             , LocalDateTime.parse(time, formatter)
               , sid
@@ -26,10 +29,10 @@ object Transaction {
               , qty.toInt
             )
           )
-        case _ => Right(s"Failed to parse: $string")
+        case _ => Failure(new Exception(s"Failed to parse: $string"))
       }
     } catch {
-      case e => Right(s"Failed to parse: $string, with exception: $e")
+      case e: Throwable => Failure(e)
     }
   }
 
@@ -121,8 +124,8 @@ object Main extends App with LazyLogging {
 
   for (either_t <- transactionLines.take(10).map(Transaction.parse(_))) {
     either_t match {
-      case Left(t) => println(s"$t")
-      case Right(s) => logger.error(s); System.exit(1)
+      case Success(t) => println(s"$t") // TODO: append to relevant tmp file
+      case Failure(e) => throw e
     }
   }
 }
