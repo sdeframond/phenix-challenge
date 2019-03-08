@@ -130,7 +130,10 @@ object Main extends App with LazyLogging {
   // TODO : take all transactions. --SDF 2019-03-07
   val transactions = transactionLines.take(10).map(Transaction.parse(_))
 
-  val finalMap = transactions.groupBy(_.get.storeId)
+  val finalMap = transactions
+    .map(_.get)
+    .groupBy(_.storeId)
+    .mapValues(_.toSeq.sortBy(_.productId))
 
-  println(s"$finalMap")
+  println(s"${finalMap}")
 }
