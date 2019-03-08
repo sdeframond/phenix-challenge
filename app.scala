@@ -9,14 +9,16 @@ import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
 
 case class Transaction
-  ( id: Int
+  ( id: TransactionId
   , time: LocalDateTime
   , storeId: StoreId
-  , productId: Int
+  , productId: ProductId
   , quantity: Int
   )
 
 case class StoreId(id: String)
+case class TransactionId(id: Int)
+case class ProductId(id: Int)
 
 object Transaction {
   def parse(string: String): Try[Transaction] = {
@@ -24,11 +26,11 @@ object Transaction {
       string match {
         case regex(id, time, sid, pid, qty) =>
           Success(Transaction
-            ( id.toInt
+            ( TransactionId(id.toInt)
             , LocalDateTime.parse(time, formatter)
-              , StoreId(sid)
-              , pid.toInt
-              , qty.toInt
+            , StoreId(sid)
+            , ProductId(pid.toInt)
+            , qty.toInt
             )
           )
         case _ => Failure(new Exception(s"Failed to parse: $string"))
@@ -121,19 +123,17 @@ object Main extends App with LazyLogging {
 
   val transactionsFileName = s"transactions_${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.data"
 
-  // FIXME: Make path interoperable --SDF 2019-03-06
-  val transactionLines = scala.io.Source
-    .fromFile(s"$rootDirectory/data/$transactionsFileName")
+  val productQtyByStore = scala.io.Source
+    .fromFile(s"$rootDirectory/data/$transactionsFileName") // FIXME: Make path interoperable --SDF 2019-03-06
     .getLines()
     .toIterable
-
-  // TODO : take all transactions. --SDF 2019-03-07
-  val transactions = transactionLines.take(100).map(Transaction.parse(_))
-
-  val productQtyByStore = transactions
-    .map(_.get)
+    .take(100) // TODO : take all transactions. --SDF 2019-03-07
+    .map(Transaction.parse(_).get)
     .groupBy(_.storeId)
-    .mapValues(_.groupBy(_.productId).mapValues(_.map(_.quantity).sum))
+    .mapValues(
+      _.groupBy(_.productId)
+      .mapValues(_.map(_.quantity).sum)
+    )
 
   println(s"${productQtyByStore}")
 }
