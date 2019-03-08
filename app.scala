@@ -122,20 +122,15 @@ object Main extends App with LazyLogging {
   val transactionsFileName = s"transactions_${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.data"
 
   // FIXME: Make path interoperable --SDF 2019-03-06
-  val transactionLines = scala.io.Source.fromFile(s"$rootDirectory/data/$transactionsFileName").getLines()
+  val transactionLines = scala.io.Source
+    .fromFile(s"$rootDirectory/data/$transactionsFileName")
+    .getLines()
+    .toIterable
 
   // TODO : take all transactions. --SDF 2019-03-07
   val transactions = transactionLines.take(10).map(Transaction.parse(_))
 
-  val storeTxMap = Map[StoreId, List[Transaction]]()
-  val finalMap = transactions.foldLeft(storeTxMap) {
-    case (map, Success(tx)) =>
-      map.get(tx.storeId) match {
-        case Some(it) => map + (tx.storeId -> (tx :: it))
-        case None => map + (tx.storeId -> (tx :: List()))
-      }
-    // FIXME: Handle failure case. Have a look at some monadic syntax maybe ? --SDF 2019-03-07
-  }
+  val finalMap = transactions.groupBy(_.get.storeId)
 
   println(s"$finalMap")
 }
