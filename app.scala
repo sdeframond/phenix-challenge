@@ -75,9 +75,9 @@ object Main extends App with LazyLogging {
     ## Algorithm
 
     For the last day:
-      Split transactions file per store into tmp files. Sort them by product.
+      Split transactions file per store into tmp files.
       For each store:
-        - sum quantities by product
+        - sum quantities by product. Sort by product.
         - join the results with the price references into 2 separate temporary files
           - productQties_<STORE_ID>.tmp.data
           - productRevenues_<STORE_ID>.tmp.data
@@ -128,12 +128,12 @@ object Main extends App with LazyLogging {
     .toIterable
 
   // TODO : take all transactions. --SDF 2019-03-07
-  val transactions = transactionLines.take(10).map(Transaction.parse(_))
+  val transactions = transactionLines.take(100).map(Transaction.parse(_))
 
-  val finalMap = transactions
+  val productQtyByStore = transactions
     .map(_.get)
     .groupBy(_.storeId)
-    .mapValues(_.toSeq.sortBy(_.productId))
+    .mapValues(_.groupBy(_.productId).mapValues(_.map(_.quantity).sum))
 
-  println(s"${finalMap}")
+  println(s"${productQtyByStore}")
 }
