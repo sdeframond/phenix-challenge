@@ -5,6 +5,7 @@ import java.time.format.DateTimeFormatter
 import java.time.{LocalDate, LocalDateTime}
 
 import scala.collection.JavaConverters._
+import scala.collection.immutable.Map
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
 
@@ -99,7 +100,9 @@ object Main extends App with LazyLogging {
     ## Algorithm
 
     For the last day:
+
       Split transactions file per store into tmp files.
+
       For each store:
         - sum quantities by product. Sort by product.
           - productQties_<STORE_ID>.tmp.data
@@ -109,13 +112,13 @@ object Main extends App with LazyLogging {
           - productQties_GLOBAL_YYYYMMDD.tmp.data
           - productRevenues_GLOBAL_YYYYMMDD.tmp.data
 
-    From these temporary files, produce:
-      - top_100_ventes_<ID_MAGASIN>_YYYYMMDD.data
-      - top_100_ca_<ID_MAGASIN>_YYYYMMDD.data
+      From these temporary files, produce:
+        - top_100_ventes_<ID_MAGASIN>_YYYYMMDD.data
+        - top_100_ca_<ID_MAGASIN>_YYYYMMDD.data
 
-    And merge the tmp files to get:
-      - top_100_ventes_GLOBAL_YYYYMMDD.data
-      - top_100_ca_GLOBAL_YYYYMMDD.data
+      And merge the tmp files to get:
+        - top_100_ventes_GLOBAL_YYYYMMDD.data
+        - top_100_ca_GLOBAL_YYYYMMDD.data
 
     Then for each of the 6 previous days, produce the same temporary files and
     incrementally merge them with the previous ones. Delete the temporary files
@@ -147,7 +150,7 @@ object Main extends App with LazyLogging {
     scala.io.Source.fromFile(s"$rootDirectory/data/${name}_${dayString}.data")
   }
 
-  val productQtiesByStore = dataSource("transactions") // FIXME: Make path interoperable --SDF 2019-03-06
+  val productQtiesByStore = dataSource("transactions")
     .getLines()
     .toIterable
     .map(Transaction.parse(_).get)
@@ -181,5 +184,16 @@ object Main extends App with LazyLogging {
     })
   })
 
-  println(s"${overallProductRevenues}")
+  def getTop100[V <% Ordered[V]](valueByProduct: Map[ProductId, V]) = valueByProduct
+      .toList
+      .sortBy({case (pid, value) => value})
+      .reverse
+      .take(100)
+
+  val top100QtyByStore = productQtiesByStore.mapValues(getTop100(_))
+  val top100RevenueByStore = productRevenuesByStore.mapValues(getTop100(_))
+  val top100QtyOverall = getTop100(overallProductQties)
+  val top100RevenueOverall = getTop100(overallProductRevenues)
+
+  top100RevenueOverall foreach println
 }
