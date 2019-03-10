@@ -169,4 +169,17 @@ object Main extends App with LazyLogging {
       )
     }}).toMap
 
+  val overallProductQties = productQtiesByStore.values.reduce((left, right) => {
+    left.foldLeft(right)({case (qties, (pid, qty)) =>
+      qties + (pid -> (qty + qties.getOrElse(pid, 0)))
+    })
+  })
+
+  val overallProductRevenues = productRevenuesByStore.values.reduce((left, right) => {
+    left.foldLeft(right)({case (qties, (pid, qty)) =>
+      qties + (pid -> (qty + qties.getOrElse(pid, 0)))
+    })
+  })
+
+  println(s"${overallProductRevenues}")
 }
