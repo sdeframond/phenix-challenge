@@ -1,6 +1,7 @@
 import com.typesafe.scalalogging.LazyLogging
 
 import java.nio.file.{Files, Paths}
+import java.io.{FileWriter, PrintWriter}
 import java.time.format.DateTimeFormatter
 import java.time.{LocalDate, LocalDateTime}
 
@@ -194,5 +195,23 @@ object Main extends App with LazyLogging {
   val top100QtyOverall = getTop100(overallProductQties)
   val top100RevenueOverall = getTop100(overallProductRevenues)
 
-  top100RevenueOverall foreach println
+  def using[A <: {def close(): Unit}, B](param: A)(f: A => B): B =
+    try { f(param) } finally { param.close() }
+
+  def serialize[V](name: String, top100: List[(ProductId, V)]) =
+    using(new FileWriter(s"$rootDirectory/results/top_100_${name}_${dayString}.data")) {
+      writer => using(new PrintWriter(writer)) {
+        printer => top100.foreach({case (ProductId(pid), qty) => printer.println(s"$pid|$qty")})
+      }
+    }
+
+  top100QtyByStore.foreach {
+    case (sid, top100) => serialize(s"ventes_${sid.id}", top100)
+  }
+  top100RevenueByStore.foreach {
+    case (sid, top100) => serialize(s"ca_${sid.id}", top100)
+  }
+
+  serialize("ventes_GLOBAL", top100QtyOverall)
+  serialize("ca_GLOBAL", top100RevenueOverall)
 }
