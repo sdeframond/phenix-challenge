@@ -44,6 +44,28 @@ object Transaction {
   private val regex = raw"(\d+)\|([^\|]+)\|([^\|]+)\|(\d+)\|(\d+)".r
 }
 
+case class Reference(productId: ProductId, price: BigDecimal)
+
+object Reference {
+  def parse(string: String): Try[Reference] = {
+    try {
+      string match {
+        case regex(pid, price) =>
+          Success(Reference
+            ( ProductId(pid.toInt)
+            , BigDecimal(price)
+            )
+          )
+        case _ => Failure(new Exception(s"Failed to parse: $string"))
+      }
+    } catch {
+      case e: Throwable => Failure(e)
+    }
+  }
+
+  private val regex = raw"(\d+)\|(\d+\.\d{1,2})".r
+}
+
 object Main extends App with LazyLogging {
   /*
     ## Assumptions
@@ -80,8 +102,8 @@ object Main extends App with LazyLogging {
       Split transactions file per store into tmp files.
       For each store:
         - sum quantities by product. Sort by product.
-        - join the results with the price references into 2 separate temporary files
           - productQties_<STORE_ID>.tmp.data
+        - join the results with the price references
           - productRevenues_<STORE_ID>.tmp.data
         - merge the above files into 2 additional temporary files
           - productQties_GLOBAL_YYYYMMDD.tmp.data
@@ -118,16 +140,16 @@ object Main extends App with LazyLogging {
   }
   val rootDirectory = args(0)
   val day = if(args.length == 2) LocalDate.parse(args(1)) else LocalDate.now()
+  val dayString = day.format(DateTimeFormatter.BASIC_ISO_DATE)
 
-  val files = Files.walk(Paths.get(rootDirectory)).iterator().asScala
+  def dataSource(name: String) = {
+    // FIXME: Make path interoperable --SDF 2019-03-06
+    scala.io.Source.fromFile(s"$rootDirectory/data/${name}_${dayString}.data")
+  }
 
-  val transactionsFileName = s"transactions_${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.data"
-
-  val productQtyByStore = scala.io.Source
-    .fromFile(s"$rootDirectory/data/$transactionsFileName") // FIXME: Make path interoperable --SDF 2019-03-06
+  val productQtiesByStore = dataSource("transactions") // FIXME: Make path interoperable --SDF 2019-03-06
     .getLines()
     .toIterable
-    .take(100) // TODO : take all transactions. --SDF 2019-03-07
     .map(Transaction.parse(_).get)
     .groupBy(_.storeId)
     .mapValues(
@@ -135,5 +157,16 @@ object Main extends App with LazyLogging {
       .mapValues(_.map(_.quantity).sum)
     )
 
-  println(s"${productQtyByStore}")
+  val productRevenuesByStore = productQtiesByStore
+    .map({ case (id, productQties) => {
+      val prices = dataSource(s"reference_prod-${id.id}")
+        .getLines()
+        .map(Reference.parse(_).get)
+        .map(r => (r.productId -> r.price))
+        .toMap
+      (id -> productQties
+        .flatMap({case (pid, qty) => for { price <- prices.get(pid) } yield (pid, price * qty)})
+      )
+    }}).toMap
+
 }
