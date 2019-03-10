@@ -172,19 +172,18 @@ object Main extends App with LazyLogging {
       )
     }}).toMap
 
-  val overallProductQties = productQtiesByStore.values.reduce((left, right) => {
-    left.foldLeft(right)({case (qties, (pid, qty)) =>
-      qties + (pid -> (qty + qties.getOrElse(pid, 0)))
+  def combine[V](left: Map[ProductId, V], right: Map[ProductId, V])(implicit num: Numeric[V]) = {
+    import num._
+    left.foldLeft(right)({case (sumsByProduct, (pid, value)) =>
+      sumsByProduct + (pid -> plus(value, sumsByProduct.getOrElse(pid, zero)))
     })
-  })
+  }
 
-  val overallProductRevenues = productRevenuesByStore.values.reduce((left, right) => {
-    left.foldLeft(right)({case (qties, (pid, qty)) =>
-      qties + (pid -> (qty + qties.getOrElse(pid, 0)))
-    })
-  })
+  val overallProductQties = productQtiesByStore.values.reduce(combine[Int])
+  val overallProductRevenues = productRevenuesByStore.values.reduce(combine[BigDecimal])
 
-  def getTop100[V <% Ordered[V]](valueByProduct: Map[ProductId, V]) = valueByProduct
+  def getTop100[V <% Ordered[V]](valueByProduct: Map[ProductId, V]) =
+    valueByProduct
       .toList
       .sortBy({case (pid, value) => value})
       .reverse
