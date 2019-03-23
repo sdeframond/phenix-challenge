@@ -9,7 +9,9 @@ class MainSpec extends FunSpec {
   listFiles("src/test/resources/cases").forEach {
     caseDir => {
       val expectedFiles = listFiles(s"$caseDir/expectedResults")
+
       describe(caseDir.getFileName.toString) {
+
         it("should produce all expected files") {
           withTempDirectory {
             outputPath => {
@@ -20,7 +22,9 @@ class MainSpec extends FunSpec {
             }
           }
         }
+
         expectedFiles forEach {
+
           expected => it(s"${expected.getFileName} should have the expected content") {
             withTempDirectory {
               outputPath => {
