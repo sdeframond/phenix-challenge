@@ -70,17 +70,18 @@ object Reference {
 
 object Main extends App with LazyLogging {
 
-  if(args.length < 1) {
-    logger.error("USAGE : phenix-challenge <path_to_root> [<YYYY-MM-DD>]")
+  if(args.length < 2) {
+    logger.error("USAGE : phenix-challenge <path_to_data> <output_dir> [<YYYY-MM-DD>]")
     System.exit(1)
   }
-  val rootDirectory = args(0)
-  val day = if(args.length == 2) LocalDate.parse(args(1)) else LocalDate.now()
+  val dataDirectory = args(0)
+  val outputDirectory = args(1)
+  val day = if(args.length == 3) LocalDate.parse(args(2)) else LocalDate.now()
   val dayString = day.format(DateTimeFormatter.BASIC_ISO_DATE)
 
   def dataSource(name: String) = {
     // FIXME: Make path interoperable --SDF 2019-03-06
-    scala.io.Source.fromFile(s"$rootDirectory/data/${name}_${dayString}.data")
+    scala.io.Source.fromFile(s"$dataDirectory/${name}_${dayString}.data")
   }
 
   val productQtiesByStore = dataSource("transactions")
@@ -131,7 +132,7 @@ object Main extends App with LazyLogging {
     try { f(param) } finally { param.close() }
 
   def serialize[V](name: String, top100: List[(ProductId, V)]) =
-    using(new FileWriter(s"$rootDirectory/results/top_100_${name}_${dayString}.data")) {
+    using(new FileWriter(s"$outputDirectory/top_100_${name}_${dayString}.data")) {
       writer => using(new PrintWriter(writer)) {
         printer => top100.foreach({case (ProductId(pid), qty) => printer.println(s"$pid|$qty")})
       }

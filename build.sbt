@@ -6,6 +6,7 @@ lazy val root = (project in file(".")).
     name := "phenix-challenge",
     libraryDependencies ++= List(
       "ch.qos.logback" % "logback-classic" % "1.2.3",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.8.0"
+      "com.typesafe.scala-logging" %% "scala-logging" % "3.8.0",
+      "org.scalatest" %% "scalatest" % "3.0.5" % Test
     )
   )
