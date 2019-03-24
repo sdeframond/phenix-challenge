@@ -6,6 +6,9 @@ import java.io.{FileWriter, PrintWriter}
 import java.time.format.DateTimeFormatter
 import java.time.{LocalDate, LocalDateTime}
 
+import scala.util.{Failure, Success, Try}
+import scala.io.Source
+
 import model._
 
 case class Aggregate
@@ -16,14 +19,38 @@ case class Aggregate
   )
 
 object Aggregate {
-  def fromDay(dataDirectory: String, dayString: String) = {
-    def dataSource(name: String) = {
-      // FIXME: Make path interoperable --SDF 2019-03-06
-      scala.io.Source.fromFile(s"$dataDirectory/${name}_${dayString}.data")
-    }
 
-    val productQtiesByStore = dataSource("transactions")
-      .getLines()
+  def merge(x: Aggregate, y: Aggregate): Aggregate = {
+    Aggregate(
+      combine(x.productQtiesByStore, y.productQtiesByStore),
+      combine(x.productRevenuesByStore, y.productRevenuesByStore),
+      combine(x.overallProductQties, y.overallProductQties),
+      combine(x.overallProductRevenues, y.overallProductRevenues)
+    )
+  }
+
+  def fromDataSource(dataSource: String => Try[Source]): Try[Aggregate] = {
+    dataSource("transactions")
+      .map(getProductQtiesByStore)
+      .map(
+        productQtiesByStore => {
+          val productRevenuesByStore = productQtiesByStore
+            .map({ case (storeId, productQties) =>
+              getProductRevenues(dataSource, storeId, productQties)
+            })
+            .filter(_.isSuccess)
+            .map(_.get)
+            .toMap
+
+          val overallProductQties = productQtiesByStore.values.reduce(combine[Map[ProductId, Int]])
+          val overallProductRevenues = productRevenuesByStore.values.reduce(combine[Map[ProductId, BigDecimal]])
+          Aggregate(productQtiesByStore, productRevenuesByStore, overallProductQties, overallProductRevenues)
+        }
+      )
+  }
+
+  private def getProductQtiesByStore(transactionsSource: Source): Map[StoreId, Map[ProductId, Int]] = {
+    transactionsSource.getLines()
       .toIterable
       .map(Transaction.parse(_).get)
       .groupBy(_.storeId)
@@ -31,30 +58,58 @@ object Aggregate {
         _.groupBy(_.productId)
         .mapValues(_.map(_.quantity).sum)
       )
+  }
 
-    val productRevenuesByStore = productQtiesByStore
-      .map({ case (id, productQties) => {
-        val prices = dataSource(s"reference_prod-${id.id}")
-          .getLines()
+  private def getProductRevenues(dataSource: String => Try[Source], storeId: StoreId, productQties: Map[ProductId, Int]): Try[(StoreId, Map[ProductId, BigDecimal])] = {
+    dataSource(s"reference_prod-${storeId.id}").map(
+      referenceSource => {
+        val prices = referenceSource.getLines()
           .map(Reference.parse(_).get)
           .map(r => (r.productId -> r.price))
           .toMap
-        (id -> productQties
-          .flatMap({case (pid, qty) => for { price <- prices.get(pid) } yield (pid, price * qty)})
+        (storeId -> productQties.flatMap({
+            case (pid, qty) =>
+              for { price <- prices.get(pid) } yield (pid, price * qty)
+          })
         )
-      }}).toMap
-
-    val overallProductQties = productQtiesByStore.values.reduce(combine[Int])
-    val overallProductRevenues = productRevenuesByStore.values.reduce(combine[BigDecimal])
-    Aggregate(productQtiesByStore, productRevenuesByStore, overallProductQties, overallProductRevenues)
+      }
+    )
   }
 
+  private trait Combinable[T] {
+    def combine(x: T, y: T): T
+    def empty: T
+  }
 
-  private  def combine[V](left: Map[ProductId, V], right: Map[ProductId, V])(implicit num: Numeric[V]) = {
-    import num._
-    left.foldLeft(right)({case (sumsByProduct, (pid, value)) =>
-      sumsByProduct + (pid -> plus(value, sumsByProduct.getOrElse(pid, zero)))
-    })
+  private implicit object IntIsCombinable extends Combinable[Int] {
+    def combine(x: Int, y: Int) = x + y
+    def empty = 0
+  }
+
+  private implicit object BigDecimalIsCombinable extends Combinable[BigDecimal] {
+    def combine(x: BigDecimal, y: BigDecimal) = x + y
+    def empty = 0
+  }
+
+  private class MapIsCombinable[K, V](implicit comb: Combinable[V]) extends Combinable[Map[K, V]] {
+    def combine(x: Map[K, V], y: Map[K, V]) = {
+      x.foldLeft(y)({case (acc, (k, value)) =>
+        acc + (k -> comb.combine(value, acc.getOrElse(k, comb.empty)))
+      })
+    }
+    def empty = Map()
+  }
+  private implicit val ProductQtiesMapIsCombinable: Combinable[Map[ProductId, Int]]
+    = new MapIsCombinable[ProductId, Int]
+  private implicit val ProductRevenueMapIsCombinable: Combinable[Map[ProductId, BigDecimal]]
+    = new MapIsCombinable[ProductId, BigDecimal]
+  private implicit val QtiesByStoreMapIsCombinable: Combinable[Map[StoreId, Map[ProductId, Int]]]
+    = new MapIsCombinable[StoreId, Map[ProductId, Int]]
+  private implicit val RevenueByStoreMapIsCombinable: Combinable[Map[StoreId, Map[ProductId, BigDecimal]]]
+    = new MapIsCombinable[StoreId, Map[ProductId, BigDecimal]]
+
+  private def combine[T](x: T, y: T)(implicit comb: Combinable[T]) = {
+    comb.combine(x, y)
   }
 }
 
@@ -66,10 +121,32 @@ object Main extends App with LazyLogging {
   val dataDirectory = args(0)
   val outputDirectory = args(1)
   val day = if(args.length == 3) LocalDate.parse(args(2)) else LocalDate.now()
-  val dayString = day.format(DateTimeFormatter.BASIC_ISO_DATE)
 
-  val dailyAggregate = Aggregate.fromDay(dataDirectory, dayString)
-  serializeTop100s(dailyAggregate, dayString)
+  val dayString = formatDate(day)
+  val tryDailyAggregate = Aggregate.fromDataSource(dataSource(dayString))
+  tryDailyAggregate.foreach(
+    dailyAggregate => {
+      serializeTop100s(dailyAggregate, dayString)
+      val weeklyAggregate = (1 to 6)
+        .map(i => {
+          Aggregate.fromDataSource(dataSource(formatDate(day.minusDays(i))))
+        })
+        .filter(_.isSuccess)
+        .map(_.get)
+        .foldLeft(dailyAggregate)(Aggregate.merge(_, _))
+      serializeTop100s(weeklyAggregate, s"$dayString-J7")
+    }
+  )
+
+
+  def dataSource(dayString: String)(name: String) = {
+    // FIXME: Make path interoperable --SDF 2019-03-06
+    Try(Source.fromFile(s"$dataDirectory/${name}_${dayString}.data"))
+  }
+
+  def formatDate(date: LocalDate) = {
+    date.format(DateTimeFormatter.BASIC_ISO_DATE)
+  }
 
   def serializeTop100s(aggregate: Aggregate, postfix: String) = {
     val top100QtyByStore = aggregate.productQtiesByStore.mapValues(getTop100(_))

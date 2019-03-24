@@ -60,12 +60,12 @@ class MainSpec extends FunSpec {
 
         describe(s"${caseDir.getFileName}") {
 
-          it("should produce all expected files") {
+          it("it should produce all expected files") {
             withTempDirectory {
               outputPath => {
                 Main.main(Array(s"$caseDir/data", outputPath.toString, "2017-05-14"))
-                val expected = expectedFiles.map(_.getFileName).toList.sorted
-                val results = listFiles(outputPath.toString).map(_.getFileName).sorted
+                val expected = expectedFiles.map(_.getFileName)
+                val results = listFiles(outputPath.toString).map(_.getFileName)
                 assert(expected === results)
               }
             }
@@ -99,6 +99,6 @@ class MainSpec extends FunSpec {
 
   def listFiles(dirName: String): List[Path] = {
     val file = new File(dirName)
-    file.listFiles.toList.map(_.toPath)
+    file.listFiles.toList.map(_.toPath).sorted
   }
 }
