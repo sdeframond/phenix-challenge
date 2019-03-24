@@ -1,3 +1,5 @@
+package PhenixChallenge
+
 import org.scalatest._
 import java.nio.file.{Files, Path}
 import java.io.File
