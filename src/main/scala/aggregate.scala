@@ -1,5 +1,7 @@
 package PhenixChallenge.aggregate
 
+import com.typesafe.scalalogging.LazyLogging
+
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
 
@@ -31,7 +33,7 @@ case class Aggregate
   , overallProductRevenues: Types.ProductRevenues
   )
 
-object Aggregate {
+object Aggregate extends LazyLogging {
   import Types._
 
   def merge(x: Aggregate, y: Aggregate): Aggregate = {
@@ -75,19 +77,21 @@ object Aggregate {
   }
 
   private def getProductRevenues(dataSource: String => Try[Source], storeId: StoreId, productQties: ProductQties): Try[(StoreId, ProductRevenues)] = {
-    dataSource(s"reference_prod-${storeId.id}").map(
-      referenceSource => {
+    dataSource(s"reference_prod-${storeId.id}") match {
+      case Success(referenceSource) => {
         val prices = referenceSource.getLines()
           .map(Reference.parse(_).get)
           .map(r => (r.productId -> r.price))
           .toMap
-        (storeId -> productQties.flatMap({
+        Success(storeId -> productQties.flatMap({
             case (pid, qty) =>
               for { price <- prices.get(pid) } yield (pid, price * qty)
           })
         )
       }
-    )
+
+      case Failure(e) => Failure(e)
+    }
   }
 
   private trait Combinable[T] {
@@ -107,8 +111,9 @@ object Aggregate {
 
   private class MapIsCombinable[K, V](implicit comb: Combinable[V]) extends Combinable[Map[K, V]] {
     def combine(x: Map[K, V], y: Map[K, V]) = {
-      x.foldLeft(y)({case (acc, (k, value)) =>
-        acc + (k -> comb.combine(value, acc.getOrElse(k, comb.empty)))
+      x.foldLeft(y)({case (acc, (k, value)) => {
+          acc + (k -> comb.combine(value, acc.getOrElse(k, comb.empty)))
+        }
       })
     }
     def empty = Map()

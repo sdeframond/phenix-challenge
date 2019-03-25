@@ -28,7 +28,7 @@ object Reference {
     }
   }
 
-  private val regex = raw"(\d+)\|(\d+\.\d{1,2})".r
+  private val regex = raw"(\d+)\|(\d+(?:\.\d{1,2})?)".r
 }
 
 case class Transaction

@@ -22,26 +22,41 @@ object Main extends App with LazyLogging {
   val day = if(args.length == 3) LocalDate.parse(args(2)) else LocalDate.now()
   val dayString = formatDate(day)
 
-  Aggregate
-    .fromDataSource(dataSource(dayString))
-    .foreach( // skipped if we cannot produce the main day's aggregate.
-      dailyAggregate => {
-        serializeTop100s(dailyAggregate, dayString)
-        val weeklyAggregate = (1 to 6)
-          .map(i => {
-            Aggregate.fromDataSource(dataSource(formatDate(day.minusDays(i))))
-          })
-          .filter(_.isSuccess)
-          .map(_.get)
-          .foldLeft(dailyAggregate)(Aggregate.merge(_, _))
-        serializeTop100s(weeklyAggregate, s"$dayString-J7")
-      }
-    )
 
+  logger.info("Starting daily aggregate")
+  Aggregate.fromDataSource(dataSource(dayString)) match {
+    case Success(dailyAggregate) => {
+      logger.info("Writing daily aggregate")
+      serializeTop100s(dailyAggregate, dayString)
+      val weeklyAggregate = (1 to 6).toIterator
+        .map(i => {
+          logger.info(s"Starting aggregate for day minus $i")
+          Aggregate.fromDataSource(dataSource(formatDate(day.minusDays(i))))
+        })
+        .filter(_.isSuccess)
+        .map(_.get)
+        .foldLeft(dailyAggregate)((x, y) => {
+          logger.info(s"Folding")
+          Aggregate.merge(x, y)
+        })
+      logger.info(s"Writing weekly aggregate")
+      serializeTop100s(weeklyAggregate, s"$dayString-J7")
+    }
+    case Failure(e) => {
+      logger.error(s"Failed to create main aggregate with error: $e")
+    }
+  }
 
   def dataSource(postfix: String)(name: String) = {
+    val fileName = s"$dataDirectory/${name}_${postfix}.data"
     // FIXME: Make path interoperable --SDF 2019-03-06
-    Try(Source.fromFile(s"$dataDirectory/${name}_${postfix}.data"))
+    Try(Source.fromFile(fileName)) match {
+      case Success(source) => Success(source)
+      case Failure(e) => {
+        logger.error(s"Could not open data source: $fileName")
+        Failure(e)
+      }
+    }
   }
 
   def formatDate(date: LocalDate) = {
@@ -70,10 +85,12 @@ object Main extends App with LazyLogging {
   def using[A <: {def close(): Unit}, B](param: A)(f: A => B): B =
     try { f(param) } finally { param.close() }
 
-  def serialize[V](name: String, top100: List[(ProductId, V)]) =
-    using(new FileWriter(s"$outputDirectory/top_100_${name}.data")) {
+  def serialize[V](name: String, top100: List[(ProductId, V)]) = {
+    val fileName = s"$outputDirectory/top_100_${name}.data"
+    using(new FileWriter(fileName)) {
       writer => using(new PrintWriter(writer)) {
         printer => top100.foreach({case (ProductId(pid), qty) => printer.println(s"$pid|$qty")})
       }
     }
+  }
 }
