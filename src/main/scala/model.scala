@@ -5,9 +5,17 @@ import java.time.{LocalDate, LocalDateTime}
 
 import scala.util.{Failure, Success, Try}
 
+trait Serializable {
+  def serialize(): String
+}
+
 case class TransactionId(id: Int)
-case class StoreId(id: String)
-case class ProductId(id: Int)
+case class StoreId(id: String) extends Ordered[StoreId] {
+  def compare(that: StoreId) = id.compare(that.id)
+}
+case class ProductId(id: Int) extends Ordered[ProductId] {
+  def compare(that: ProductId) = id.compare(that.id)
+}
 
 case class Reference(productId: ProductId, price: BigDecimal)
 
@@ -37,25 +45,22 @@ case class Transaction
   , storeId: StoreId
   , productId: ProductId
   , quantity: Int
-  )
+  )  extends Serializable {
+    def serialize: String = {
+      s"${id.id}|20170514T051919+0100|${storeId.id}|${productId.id}|$quantity"
+    }
+  }
 
 object Transaction {
-  def parse(string: String): Try[Transaction] = {
-    try {
-      string match {
-        case regex(id, time, sid, pid, qty) =>
-          Success(Transaction
-            ( TransactionId(id.toInt)
-            , LocalDateTime.parse(time, formatter)
-            , StoreId(sid)
-            , ProductId(pid.toInt)
-            , qty.toInt
-            )
-          )
-        case _ => Failure(new Exception(s"Failed to parse: $string"))
-      }
-    } catch {
-      case e: Throwable => Failure(e)
+  implicit def parse(string: String): Transaction = {
+    string match {
+      case regex(id, time, sid, pid, qty) =>
+        Transaction(TransactionId(id.toInt),
+                    LocalDateTime.parse(time, formatter),
+                    StoreId(sid),
+                    ProductId(pid.toInt),
+                    qty.toInt)
+      case _ => throw new Exception(s"Failed to parse: $string")
     }
   }
 

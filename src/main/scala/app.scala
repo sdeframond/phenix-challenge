@@ -10,7 +10,7 @@ import scala.util.{Failure, Success, Try}
 import scala.io.Source
 
 import model._
-import aggregate.{Aggregate, Helpers}
+import aggregate.{Aggregate, ProductValue, TempFileManager}
 
 object Main extends App with LazyLogging {
   if(args.length < 2) {
@@ -19,39 +19,32 @@ object Main extends App with LazyLogging {
   }
   val dataDirectory = args(0)
   val outputDirectory = args(1)
-  val day = if(args.length == 3) LocalDate.parse(args(2)) else LocalDate.now()
-  val dayString = formatDate(day)
+  val currentDay = if(args.length == 3) LocalDate.parse(args(2)) else LocalDate.now()
+  val dayString = formatDate(currentDay)
 
+  using(new TempFileManager)(tfm => {
+    val dailyAggregates = (0 to 6).toArray.map(i => {
+      val day = currentDay.minusDays(i)
+      logger.info(s"Starting aggregate for $day")
+      Aggregate(tfm, dataSource(formatDate(day)))
+    })
 
-  logger.info("Starting daily aggregate")
-  Aggregate.fromDataSource(dataSource(dayString)) match {
-    case Success(dailyAggregate) => {
-      logger.info("Writing daily aggregate")
-      serializeTop100s(dailyAggregate, dayString)
-      val weeklyAggregate = (1 to 6).toIterator
-        .map(i => {
-          logger.info(s"Starting aggregate for day minus $i")
-          Aggregate.fromDataSource(dataSource(formatDate(day.minusDays(i))))
-        })
-        .filter(_.isSuccess)
-        .map(_.get)
-        .foldLeft(dailyAggregate)((x, y) => {
-          logger.info(s"Folding")
-          Aggregate.merge(x, y)
-        })
-      logger.info(s"Writing weekly aggregate")
-      serializeTop100s(weeklyAggregate, s"$dayString-J7")
-    }
-    case Failure(e) => {
-      logger.error(s"Failed to create main aggregate with error: $e")
-    }
-  }
+    logger.info("Writing daily results")
+    serializeTop100s(dailyAggregates(0).get, dayString)
+
+    val weeklyAggregate = dailyAggregates.filter(_.isSuccess).map(_.get).reduce(_.merge(_))
+    logger.info(s"Writing weekly results")
+    serializeTop100s(weeklyAggregate, s"$dayString-J7")
+  })
 
   def dataSource(postfix: String)(name: String) = {
     val fileName = s"$dataDirectory/${name}_${postfix}.data"
     // FIXME: Make path interoperable --SDF 2019-03-06
     Try(Source.fromFile(fileName)) match {
-      case Success(source) => Success(source)
+      case Success(source) => {
+        logger.debug(s"Opening data source: $fileName")
+        Success(source)
+      }
       case Failure(e) => {
         logger.error(s"Could not open data source: $fileName")
         Failure(e)
@@ -64,32 +57,28 @@ object Main extends App with LazyLogging {
   }
 
   def serializeTop100s(aggregate: Aggregate, postfix: String) = {
-    import Helpers.TakeTop
     val n = 100
-    val top100QtyByStore = aggregate.productQtiesByStore.mapValues(_.takeTop(n))
-    val top100RevenueByStore = aggregate.productRevenuesByStore.mapValues(_.takeTop(n))
-    val top100QtyOverall = aggregate.overallProductQties.takeTop(n)
-    val top100RevenueOverall = aggregate.overallProductRevenues.takeTop(n)
 
-    top100QtyByStore.foreach {
+    aggregate.getTopQtiesByStore(n).foreach {
       case (sid, top100) => serialize(s"ventes_${sid.id}_${postfix}", top100)
     }
-    top100RevenueByStore.foreach {
+    aggregate.getTopRevenuesByStore(n).foreach {
       case (sid, top100) => serialize(s"ca_${sid.id}_${postfix}", top100)
     }
 
-    serialize(s"ventes_GLOBAL_${postfix}", top100QtyOverall)
-    serialize(s"ca_GLOBAL_${postfix}", top100RevenueOverall)
+    serialize(s"ventes_GLOBAL_${postfix}", aggregate.getTopQties(n))
+    serialize(s"ca_GLOBAL_${postfix}", aggregate.getTopRevenues(n))
   }
 
   def using[A <: {def close(): Unit}, B](param: A)(f: A => B): B =
     try { f(param) } finally { param.close() }
 
-  def serialize[V](name: String, top100: List[(ProductId, V)]) = {
+  def serialize[V](name: String, top100: Iterator[ProductValue[V]]) = {
     val fileName = s"$outputDirectory/top_100_${name}.data"
+    logger.debug(s"Serializing to file: $fileName")
     using(new FileWriter(fileName)) {
       writer => using(new PrintWriter(writer)) {
-        printer => top100.foreach({case (ProductId(pid), qty) => printer.println(s"$pid|$qty")})
+        printer => top100.foreach(line => printer.println(s"${line.productId.id}|${line.value}"))
       }
     }
   }

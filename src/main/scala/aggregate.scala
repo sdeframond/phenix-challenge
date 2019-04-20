@@ -2,132 +2,343 @@ package PhenixChallenge.aggregate
 
 import com.typesafe.scalalogging.LazyLogging
 
+import java.io.{File, FileWriter, PrintWriter}
+
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
 
 import PhenixChallenge.model._
 
-object Types {
-  type ProductMap[V] = Map[ProductId, V]
-  type ProductQties = ProductMap[Int]
-  type ProductRevenues = ProductMap[BigDecimal]
-  type ProductQtiesByStore = Map[StoreId, ProductQties]
-  type ProductRevenuesByStore = Map[StoreId, ProductRevenues]
+class TempFileManager extends LazyLogging {
+  private var files: List[File] = List()
+  private var closed = false
+
+  def getNewFile: File = {
+    if (closed) { throw new Exception("Cannot get a new file after closing manager") }
+    val f = File.createTempFile("phenixAggregate", ".tmp")
+    files = f :: files
+    f
+  }
+
+  def close(): Unit = {
+    files.foreach(f => {
+      logger.debug(s"Deleting tmp file: $f")
+      f.delete
+    })
+    closed = true
+    files = List()
+  }
+
 }
 
-object Helpers {
-  implicit class TakeTop[V <% Ordered[V]](x: Types.ProductMap[V]) {
-    def takeTop(n: Int) =
-      x
-        .toList
-        .sortBy({case (pid, value) => value})
-        .reverse
-        .take(n)
+private object Utils {
+  def using[A <: {def close(): Unit}, B](param: A)(f: A => B): B =
+      try { f(param) } finally { param.close() }
+
+  def withPrinter[B](file: File, f: PrintWriter => B): B = {
+    using(new PrintWriter(new FileWriter(file)))(f)
+  }
+
+  implicit class ThrushOperator[A](x: A) {
+    def |>[B](g: A => B): B = {
+      g(x)
+    }
+  }
+
+  def sortedExternally[T <: Serializable](tfm: TempFileManager)
+                                         (it: Iterator[T])
+                                         (implicit ord: Ordering[T],
+                                          parse: String => T) : Iterator[T] = {
+    it.grouped(1000) // TODO soft-code this constant
+      .map(slice => {
+        val file = tfm.getNewFile
+        withPrinter(file, printer =>
+          slice.sorted.map(_.serialize).foreach(printer.println(_))
+        )
+        Source.fromFile(file).getLines.map(parse(_))
+      }) |> kWayMerge[T]
+  }
+
+  def externalSortBy[T <: Serializable, A](tfm: TempFileManager, f: T => A)
+                                          (it: Iterator[T])
+                                          (implicit ordA: Ordering[A],
+                                           parse: String => T) : Iterator[T] = {
+    implicit val ordT = Ordering.by(f)
+    sortedExternally(tfm)(it)
+  }
+
+  private def kWayMerge[T](parts: Iterator[Iterator[T]])
+                          (implicit ord: Ordering[T]): Iterator[T] = {
+    parts.reduce((x, y) => new IteratorKMerger(x, y))
   }
 }
 
-case class Aggregate
-  ( productQtiesByStore: Types.ProductQtiesByStore
-  , productRevenuesByStore: Types.ProductRevenuesByStore
-  , overallProductQties: Types.ProductQties
-  , overallProductRevenues: Types.ProductRevenues
-  )
+class Aggregate
+  ( private val tfm: TempFileManager
+  , private val productQties: ProductQties
+  , private val productRevenues: ProductRevenues
+  ) extends LazyLogging {
 
-object Aggregate extends LazyLogging {
-  import Types._
-
-  def merge(x: Aggregate, y: Aggregate): Aggregate = {
-    Aggregate(
-      combine(x.productQtiesByStore, y.productQtiesByStore),
-      combine(x.productRevenuesByStore, y.productRevenuesByStore),
-      combine(x.overallProductQties, y.overallProductQties),
-      combine(x.overallProductRevenues, y.overallProductRevenues)
+  def merge(other: Aggregate): Aggregate = {
+    new Aggregate(
+      new TempFileManager,
+      this.productQties.combine(other.productQties),
+      this.productRevenues.combine(other.productRevenues)
     )
   }
 
-  def fromDataSource(dataSource: String => Try[Source]): Try[Aggregate] = {
+  def getTopQties(n: Int): Iterator[ProductQty] = {
+    productQties.combineByProduct.getTop(n)
+  }
+
+  def getTopRevenues(n: Int): Iterator[ProductRevenue] = {
+    productRevenues.combineByProduct.getTop(n)
+  }
+
+  def getTopQtiesByStore(n: Int): Map[StoreId, Iterator[ProductQty]] = {
+    productQties.groupByStore.mapValues(_.getTop(n))
+  }
+
+  def getTopRevenuesByStore(n: Int): Map[StoreId, Iterator[ProductRevenue]] = {
+    productRevenues.groupByStore.mapValues(_.getTop(n))
+  }
+}
+
+object Aggregate extends LazyLogging {
+  import Utils._
+
+  def apply(tfm: TempFileManager, dataSource: String => Try[Source]): Try[Aggregate] = {
     dataSource("transactions")
-      .map(getProductQtiesByStore)
-      .map(
-        productQtiesByStore => {
-          val productRevenuesByStore = productQtiesByStore
-            .map({ case (storeId, productQties) =>
-              getProductRevenues(dataSource, storeId, productQties)
-            })
-            .filter(_.isSuccess)
-            .map(_.get)
-            .toMap
+      .map(_.getLines()
+        .map(Transaction.parse(_))
+        |> externalSortBy(tfm, x => (x.storeId, x.productId))
+      )
+      .map(ProductQties(tfm, _))
+      .map(qties => new Aggregate(tfm, qties, ProductRevenues(tfm, dataSource, qties)))
+  }
+}
 
-          val overallProductQties = productQtiesByStore.values.reduce(combine[ProductQties])
-          val overallProductRevenues = productRevenuesByStore.values.reduce(combine[ProductRevenues])
-          Aggregate(productQtiesByStore, productRevenuesByStore, overallProductQties, overallProductRevenues)
+trait Combinable[T] {
+  def combine(other: T): T;
+}
+
+class IteratorCombinator[T <: Combinable[T]](_xs: Iterator[T], _ys: Iterator[T])(implicit ord: Ordering[T])
+extends Iterator[T] {
+  private val xs = _xs.buffered
+  private val ys = _ys.buffered
+
+  def hasNext = xs.hasNext || ys.hasNext
+
+  def next() = (xs.hasNext, ys.hasNext) match {
+    case (true, true) => {
+      val x = xs.head
+      val y = ys.head
+      val comp = ord.compare(x, y)
+      if (comp < 0) {
+        xs.next()
+      } else if (comp > 0) {
+        ys.next()
+      } else {
+        xs.next()
+        ys.next()
+        x.combine(y)
+      }
+    }
+    case (true, false) => xs.next
+    case (false, true) => ys.next
+    case (false, false) => ys.next // This should throw an error
+  }
+}
+
+class IteratorKMerger[T](_xs: Iterator[T], _ys: Iterator[T])(implicit ord: Ordering[T])
+extends Iterator[T] {
+  private val xs = _xs.buffered
+  private val ys = _ys.buffered
+
+  def hasNext = xs.hasNext || ys.hasNext
+
+  def next() = (xs.hasNext, ys.hasNext) match {
+    case (true, true) => {
+      val x = xs.head
+      val y = ys.head
+      val comp = ord.compare(x, y)
+      if (comp <= 0) {
+        xs.next()
+      } else {
+        ys.next()
+      }
+    }
+    case (true, false) => xs.next
+    case (false, true) => ys.next
+    case (false, false) => ys.next // This should throw an error
+  }
+}
+
+trait ProductValue[T] {
+  val productId: ProductId
+  val value: T
+}
+
+case class ProductQty(storeId: StoreId, productId: ProductId, value: Int)
+extends Combinable[ProductQty] with Ordered[ProductQty] with ProductValue[Int] with Serializable {
+
+  def combine(other: ProductQty) = ProductQty(storeId, productId, value + other.value)
+
+  def compare(other: ProductQty) = {
+    (this.storeId -> this.productId) compare (other.storeId -> other.productId)
+  }
+
+  def serialize = s"${storeId.id}|${productId.id}|${value}"
+}
+
+private object ProductQty {
+  implicit def parse(string: String): ProductQty = {
+    string match {
+      case regex(sid, pid, v) =>
+        ProductQty( StoreId(sid), ProductId(pid.toInt), v.toInt)
+      case _ => throw new Exception(s"Failed to parse: $string")
+    }
+  }
+
+  private val regex = raw"([^\|]+)\|(\d+)\|(\d+)".r
+}
+
+case class ProductRevenue(storeId: StoreId, productId: ProductId, value: BigDecimal)
+extends Combinable[ProductRevenue] with Ordered[ProductRevenue] with ProductValue[BigDecimal]  {
+  def combine(other: ProductRevenue) = ProductRevenue(storeId, productId, value + other.value)
+  def compare(other: ProductRevenue) = {
+    (this.storeId -> this.productId) compare (other.storeId -> other.productId)
+  }
+}
+
+class ProductQties(tfm: TempFileManager, qties: Iterator[ProductQty])
+extends Combinable[ProductQties] with LazyLogging {
+  import Utils._
+
+  private val source = {
+    val file = tfm.getNewFile
+    logger.debug(s"Serializing ProductQties to: $file")
+    Utils.withPrinter(file, printer => {
+      qties.foreach(x => {
+        printer.println(x.serialize)
+      })
+    })
+    Source.fromFile(file)
+  }
+
+  def iterator(): Iterator[ProductQty] = {
+    logger.debug("Creating new ProductQties iterator")
+    source.reset.getLines.map(ProductQty.parse(_))
+  }
+
+  def combine(other: ProductQties) : ProductQties = {
+    val combined = new IteratorCombinator(iterator, other.iterator)
+    new ProductQties(tfm, combined)
+  }
+
+  def groupByStore: Map[StoreId, ProductQties] = {
+    iterator.toArray.groupBy(_.storeId).mapValues(x => new ProductQties(tfm, x.iterator))
+  }
+
+  def combineByProduct: ProductQties = {
+    implicit val ord: Ordering[ProductQty] = Ordering.by(_.productId)
+    val it = new GroupAndSumQties(
+      iterator |> sortedExternally[ProductQty](tfm)
+    )
+    new ProductQties(tfm, it)
+  }
+
+  def getTop(n: Int) = {
+    (iterator |> externalSortBy(tfm, - _.value)).take(n)
+  }
+
+}
+
+object ProductQties {
+  def apply(tfm: TempFileManager, sortedTxs: Iterator[Transaction]): ProductQties = {
+    val qties = new GroupAndSumQties(
+      sortedTxs.map(tx => ProductQty(tx.storeId, tx.productId, tx.quantity))
+    )
+    new ProductQties(tfm, qties)
+  }
+}
+
+private class GroupAndSumQties(private var it: Iterator[ProductQty])(implicit ord: Ordering[ProductQty])
+extends Iterator[ProductQty] {
+
+  def hasNext = it.hasNext
+  def next() = {
+    var x = it.next()
+    val (matching, tail) = it.span(ord.compare(_, x) == 0)
+    it = tail
+    matching.fold(x)(_.combine(_))
+  }
+}
+
+class ProductRevenues(val aggregate: Array[ProductRevenue])
+extends Combinable[ProductRevenues] with LazyLogging {
+
+  def iterator = {
+    logger.debug("Creating new ProductRevenues iterator")
+    aggregate.iterator
+  }
+
+  def combine(other: ProductRevenues) : ProductRevenues = {
+    val combined = new IteratorCombinator(iterator, other.iterator)
+    new ProductRevenues(combined.toArray)
+  }
+
+  def groupByStore: Map[StoreId, ProductRevenues] = {
+    aggregate.groupBy(_.storeId).mapValues(new ProductRevenues(_))
+  }
+
+  def combineByProduct: ProductRevenues = {
+    groupByStore
+      .values
+      .map(_.iterator.map(_.copy(storeId = StoreId(""))))
+      .map(q => new ProductRevenues(q.toArray))
+      .reduce(_.combine(_))
+  }
+
+  def getTop(n: Int) = {
+    aggregate.sortBy(- _.value).take(n).iterator
+  }
+}
+
+object ProductRevenues {
+  def apply(tfm: TempFileManager, dataSource: String => Try[Source], productQties: ProductQties)
+  : ProductRevenues = {
+    val joined = new Iterator[ProductRevenue] {
+      private val it = productQties.iterator
+      private var refSource: Option[(StoreId, Iterator[Reference])] = None
+      def hasNext = it.hasNext
+      def next() = {
+        val pqty = it.next()
+        val references = refSource match {
+          case None => setNewReferenceSource(pqty.storeId)
+          case Some((storeId, references)) => if (storeId == pqty.storeId) {
+            references
+          } else {
+            setNewReferenceSource(pqty.storeId)
+          }
         }
-      )
-  }
 
-  private def getProductQtiesByStore(transactionsSource: Source): ProductQtiesByStore = {
-    transactionsSource.getLines()
-      .toIterable
-      .map(Transaction.parse(_).get)
-      .groupBy(_.storeId)
-      .mapValues(
-        _.groupBy(_.productId)
-        .mapValues(_.map(_.quantity).sum)
-      )
-  }
+        val ref = references
+          .dropWhile(ref => ref.productId != pqty.productId)
+          .next()
 
-  private def getProductRevenues(dataSource: String => Try[Source], storeId: StoreId, productQties: ProductQties): Try[(StoreId, ProductRevenues)] = {
-    dataSource(s"reference_prod-${storeId.id}") match {
-      case Success(referenceSource) => {
-        val prices = referenceSource.getLines()
-          .map(Reference.parse(_).get)
-          .map(r => (r.productId -> r.price))
-          .toMap
-        Success(storeId -> productQties.flatMap({
-            case (pid, qty) =>
-              for { price <- prices.get(pid) } yield (pid, price * qty)
-          })
-        )
+        ProductRevenue(pqty.storeId, pqty.productId, pqty.value * ref.price)
       }
 
-      case Failure(e) => Failure(e)
+      private def setNewReferenceSource(storeId: StoreId): Iterator[Reference] = {
+        val references = dataSource(s"reference_prod-${storeId.id}").map(
+          _.getLines().map(Reference.parse(_).get)
+        ).get
+        refSource = Some(storeId, references)
+        references
+      }
     }
-  }
 
-  private trait Combinable[T] {
-    def combine(x: T, y: T): T
-    def empty: T
-  }
-
-  private implicit object IntIsCombinable extends Combinable[Int] {
-    def combine(x: Int, y: Int) = x + y
-    def empty = 0
-  }
-
-  private implicit object BigDecimalIsCombinable extends Combinable[BigDecimal] {
-    def combine(x: BigDecimal, y: BigDecimal) = x + y
-    def empty = 0
-  }
-
-  private class MapIsCombinable[K, V](implicit comb: Combinable[V]) extends Combinable[Map[K, V]] {
-    def combine(x: Map[K, V], y: Map[K, V]) = {
-      x.foldLeft(y)({case (acc, (k, value)) => {
-          acc + (k -> comb.combine(value, acc.getOrElse(k, comb.empty)))
-        }
-      })
-    }
-    def empty = Map()
-  }
-  private implicit val productQtiesMapIsCombinable: Combinable[ProductQties]
-    = new MapIsCombinable[ProductId, Int]
-  private implicit val productRevenuesMapIsCombinable: Combinable[ProductRevenues]
-    = new MapIsCombinable[ProductId, BigDecimal]
-  private implicit val qtiesByStoreMapIsCombinable: Combinable[ProductQtiesByStore]
-    = new MapIsCombinable[StoreId, ProductQties]
-  private implicit val revenuesByStoreMapIsCombinable: Combinable[ProductRevenuesByStore]
-    = new MapIsCombinable[StoreId, ProductRevenues]
-
-  private def combine[T](x: T, y: T)(implicit comb: Combinable[T]) = {
-    comb.combine(x, y)
+    new ProductRevenues(joined.toArray)
   }
 }

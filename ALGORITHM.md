@@ -33,19 +33,19 @@ For the last day:
   Split transactions file per store into tmp files.
 
   For each store:
-    - sum quantities by product. Sort by product.
-      - productQties_<STORE_ID>.tmp.data
+    - sum quantities by product. Sort by product id.
+      - productQties_<STORE_ID>_YYYYMMDD.tmp.data
     - join the results with the price references
-      - productRevenues_<STORE_ID>.tmp.data
-    - merge the above files into 2 additional temporary files
-      - productQties_GLOBAL_YYYYMMDD.tmp.data
-      - productRevenues_GLOBAL_YYYYMMDD.tmp.data
+      - productRevenues_<STORE_ID>_YYYYMMDD.tmp.data
+    - From these temporary files, produce:
+      - top_100_ventes_<ID_MAGASIN>_YYYYMMDD.data
+      - top_100_ca_<ID_MAGASIN>_YYYYMMDD.data
 
-  From these temporary files, produce:
-    - top_100_ventes_<ID_MAGASIN>_YYYYMMDD.data
-    - top_100_ca_<ID_MAGASIN>_YYYYMMDD.data
+  Merge the files above into 2 additional temporary files
+    - productQties_GLOBAL_YYYYMMDD.tmp.data
+    - productRevenues_GLOBAL_YYYYMMDD.tmp.data
 
-  And merge the tmp files to get:
+  And sort them by quantity and revenues to get:
     - top_100_ventes_GLOBAL_YYYYMMDD.data
     - top_100_ca_GLOBAL_YYYYMMDD.data
 
