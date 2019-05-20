@@ -49,7 +49,7 @@ private object Utils {
                                          (it: Iterator[T])
                                          (implicit ord: Ordering[T],
                                           parse: String => T) : Iterator[T] = {
-    it.grouped(1000) // TODO soft-code this constant
+    it.grouped(1000 * 1000) // TODO soft-code this constant
       .map(slice => {
         val file = tfm.getNewFile
         withPrinter(file, printer =>
@@ -112,9 +112,9 @@ object Aggregate extends LazyLogging {
       .map(_.getLines()
         .map(Transaction.parse(_))
         |> externalSortBy(tfm, x => (x.storeId, x.productId))
+        |> ProductQties(tfm)
+        |> (qties => new Aggregate(tfm, qties, ProductRevenues(tfm, dataSource, qties)))
       )
-      .map(ProductQties(tfm, _))
-      .map(qties => new Aggregate(tfm, qties, ProductRevenues(tfm, dataSource, qties)))
   }
 }
 
@@ -222,7 +222,9 @@ extends Combinable[ProductQties] with LazyLogging {
       qties.foreach(x => {
         printer.println(x.serialize)
       })
+      printer.flush
     })
+    logger.debug(s"Done serializing ProductQties to: $file")
     Source.fromFile(file)
   }
 
@@ -255,23 +257,28 @@ extends Combinable[ProductQties] with LazyLogging {
 }
 
 object ProductQties {
-  def apply(tfm: TempFileManager, sortedTxs: Iterator[Transaction]): ProductQties = {
-    val qties = new GroupAndSumQties(
-      sortedTxs.map(tx => ProductQty(tx.storeId, tx.productId, tx.quantity))
-    )
-    new ProductQties(tfm, qties)
+  def apply(tfm: TempFileManager)(sortedTxs: Iterator[Transaction]): ProductQties = {
+    val qties = sortedTxs.map(tx => ProductQty(tx.storeId, tx.productId, tx.quantity))
+    val grouped = new GroupAndSumQties(qties)
+    new ProductQties(tfm, grouped)
   }
 }
 
-private class GroupAndSumQties(private var it: Iterator[ProductQty])(implicit ord: Ordering[ProductQty])
+private class GroupAndSumQties(_it: Iterator[ProductQty])(implicit ord: Ordering[ProductQty])
 extends Iterator[ProductQty] {
+  private val it = _it.buffered
 
   def hasNext = it.hasNext
   def next() = {
     var x = it.next()
-    val (matching, tail) = it.span(ord.compare(_, x) == 0)
-    it = tail
-    matching.fold(x)(_.combine(_))
+
+    while (it.hasNext && (ord.compare(it.head, x) == 0)) {
+      x = x.combine(it.next())
+    }
+    x
+    // val (matching, tail) = it.span(ord.compare(_, x) == 0)
+    // it = tail
+    // matching.fold(x)(_.combine(_))
   }
 }
 
@@ -305,29 +312,40 @@ extends Combinable[ProductRevenues] with LazyLogging {
   }
 }
 
-object ProductRevenues {
+object ProductRevenues extends LazyLogging {
   def apply(tfm: TempFileManager, dataSource: String => Try[Source], productQties: ProductQties)
   : ProductRevenues = {
-    val joined = new Iterator[ProductRevenue] {
+    val joined = new Iterator[Option[ProductRevenue]] {
       private val it = productQties.iterator
       private var refSource: Option[(StoreId, Iterator[Reference])] = None
       def hasNext = it.hasNext
       def next() = {
         val pqty = it.next()
-        val references = refSource match {
-          case None => setNewReferenceSource(pqty.storeId)
-          case Some((storeId, references)) => if (storeId == pqty.storeId) {
-            references
-          } else {
-            setNewReferenceSource(pqty.storeId)
-          }
+        val references: BufferedIterator[Reference] =
+          (refSource match {
+            case None => setNewReferenceSource(pqty.storeId)
+            case Some((storeId, references)) => if (storeId == pqty.storeId) {
+              references
+            } else {
+              setNewReferenceSource(pqty.storeId)
+            }
+          })
+          .buffered
+
+        // We can do this because references are sorted.
+        while(references.hasNext && references.head.productId < pqty.productId) {
+          references.next()
         }
 
-        val ref = references
-          .dropWhile(ref => ref.productId != pqty.productId)
-          .next()
+        refSource = Some(pqty.storeId, references)
 
-        ProductRevenue(pqty.storeId, pqty.productId, pqty.value * ref.price)
+        if (references.hasNext && references.head.productId == pqty.productId) {
+          val ref = references.next()
+          Some(ProductRevenue(pqty.storeId, pqty.productId, pqty.value * ref.price))
+        } else {
+          logger.error(s"Reference not found: ${pqty.storeId}, ${pqty.productId} ")
+          None
+        }
       }
 
       private def setNewReferenceSource(storeId: StoreId): Iterator[Reference] = {
@@ -339,6 +357,9 @@ object ProductRevenues {
       }
     }
 
-    new ProductRevenues(joined.toArray)
+    logger.info("Starting serializing ProductRevenues")
+    val a = joined.filter(!_.isEmpty).map(_.get).toArray
+    logger.info("Done serializing ProductRevenues")
+    new ProductRevenues(a) // TODO serialize this iterator into a file instead of an array.
   }
 }
