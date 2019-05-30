@@ -49,14 +49,16 @@ private object Utils {
                                          (it: Iterator[T])
                                          (implicit ord: Ordering[T],
                                           parse: String => T) : Iterator[T] = {
-    it.grouped(1000 * 1000) // TODO soft-code this constant
+    val parts = it.grouped(1000 * 1000) // TODO soft-code this constant
       .map(slice => {
         val file = tfm.getNewFile
         withPrinter(file, printer =>
           slice.sorted.map(_.serialize).foreach(printer.println(_))
         )
         Source.fromFile(file).getLines.map(parse(_))
-      }) |> kWayMerge[T]
+      })
+
+    parts.reduce((x, y) => new IteratorKMerger(x, y))
   }
 
   def externalSortBy[T <: Serializable, A](tfm: TempFileManager, f: T => A)
@@ -65,11 +67,6 @@ private object Utils {
                                            parse: String => T) : Iterator[T] = {
     implicit val ordT = Ordering.by(f)
     sortedExternally(tfm)(it)
-  }
-
-  private def kWayMerge[T](parts: Iterator[Iterator[T]])
-                          (implicit ord: Ordering[T]): Iterator[T] = {
-    parts.reduce((x, y) => new IteratorKMerger(x, y))
   }
 }
 
@@ -96,11 +93,11 @@ class Aggregate
   }
 
   def getTopQtiesByStore(n: Int): Map[StoreId, Iterator[ProductQty]] = {
-    productQties.groupByStore.mapValues(_.getTop(n))
+    productQties.getTopByStore(n)
   }
 
   def getTopRevenuesByStore(n: Int): Map[StoreId, Iterator[ProductRevenue]] = {
-    productRevenues.groupByStore.mapValues(_.getTop(n))
+    productRevenues.getTopByStore(n)
   }
 }
 
@@ -174,9 +171,10 @@ extends Iterator[T] {
   }
 }
 
-trait ProductValue[T] {
+trait ProductValue[T] extends Serializable {
   val productId: ProductId
   val value: T
+
 }
 
 case class ProductQty(storeId: StoreId, productId: ProductId, value: Int)
@@ -209,6 +207,20 @@ extends Combinable[ProductRevenue] with Ordered[ProductRevenue] with ProductValu
   def compare(other: ProductRevenue) = {
     (this.storeId -> this.productId) compare (other.storeId -> other.productId)
   }
+
+  def serialize = s"${storeId.id}|${productId.id}|${value}"
+}
+
+private object ProductRevenue {
+  implicit def parse(string: String): ProductRevenue = {
+    string match {
+      case regex(sid, pid, v) =>
+        ProductRevenue(StoreId(sid), ProductId(pid.toInt), BigDecimal(v))
+      case _ => throw new Exception(s"Failed to parse: $string")
+    }
+  }
+
+  private val regex = raw"([^\|]+)\|(\d+)\|(\d+\.\d+)".r
 }
 
 class ProductQties(tfm: TempFileManager, qties: Iterator[ProductQty])
@@ -238,15 +250,9 @@ extends Combinable[ProductQties] with LazyLogging {
     new ProductQties(tfm, combined)
   }
 
-  def groupByStore: Map[StoreId, ProductQties] = {
-    iterator.toArray.groupBy(_.storeId).mapValues(x => new ProductQties(tfm, x.iterator))
-  }
-
   def combineByProduct: ProductQties = {
     implicit val ord: Ordering[ProductQty] = Ordering.by(_.productId)
-    val it = new GroupAndSumQties(
-      iterator |> sortedExternally[ProductQty](tfm)
-    )
+    val it = iterator |> sortedExternally[ProductQty](tfm) |> ProductQties.groupAndSum[ProductQty]
     new ProductQties(tfm, it)
   }
 
@@ -254,67 +260,168 @@ extends Combinable[ProductQties] with LazyLogging {
     (iterator |> externalSortBy(tfm, - _.value)).take(n)
   }
 
+  def getTopByStore(n: Int): Map[StoreId, Iterator[ProductQty]] = {
+
+    // For some reason I get a 'diverging implicit expansion for Ordering[(StoreId, Int)]'
+    // so I manually define an ordering here.
+    // val ord3 = implicitly[Ordering[(StoreId, Int)]]
+    implicit object Ord extends Ordering[ProductQty] {
+      def compare(x: ProductQty, y: ProductQty): Int = {
+        val ord1 = implicitly[Ordering[StoreId]]
+        val ord2 = implicitly[Ordering[Int]]
+        val c1 = ord1.compare(x.storeId, y.storeId)
+        if (c1 == 0) {
+          ord2.compare(y.value, x.value)
+        } else c1
+      }
+    }
+
+    val sorted = (iterator |> sortedExternally(tfm)).buffered
+    var map = Map[StoreId, Iterator[ProductQty]]()
+    while (sorted.hasNext) {
+      val key = sorted.head.storeId
+      var count = 0
+      var top = Vector[ProductQty]() // Using a vector because we assume n is small.
+
+      // Take the first n values for the current store.
+      do {
+        val n = sorted.next
+        top = top :+ n
+        count += 1
+      } while (sorted.hasNext && sorted.head.storeId == key && count < n)
+
+      // Add those values to the map
+      map = map + (key -> top.iterator)
+
+      // Drop remaining values until we reach the next store.
+      while (sorted.hasNext && sorted.head.storeId == key) {sorted.next}
+    }
+    map
+  }
+
 }
 
 object ProductQties {
   def apply(tfm: TempFileManager)(sortedTxs: Iterator[Transaction]): ProductQties = {
     val qties = sortedTxs.map(tx => ProductQty(tx.storeId, tx.productId, tx.quantity))
-    val grouped = new GroupAndSumQties(qties)
+    val grouped = groupAndSum(qties)
     new ProductQties(tfm, grouped)
   }
-}
 
-private class GroupAndSumQties(_it: Iterator[ProductQty])(implicit ord: Ordering[ProductQty])
-extends Iterator[ProductQty] {
-  private val it = _it.buffered
+  def groupAndSum[T <% Combinable[T]](_it: Iterator[T])(implicit ord: Ordering[T]) = {
+    new Iterator[T] {
+      private val it = _it.buffered
 
-  def hasNext = it.hasNext
-  def next() = {
-    var x = it.next()
+      def hasNext = it.hasNext
+      def next() = {
+        var x = it.next()
 
-    while (it.hasNext && (ord.compare(it.head, x) == 0)) {
-      x = x.combine(it.next())
+        while (it.hasNext && (ord.compare(it.head, x) == 0)) {
+          x = x.combine(it.next())
+        }
+
+        x
+      }
     }
-    x
-    // val (matching, tail) = it.span(ord.compare(_, x) == 0)
-    // it = tail
-    // matching.fold(x)(_.combine(_))
   }
 }
 
-class ProductRevenues(val aggregate: Array[ProductRevenue])
+class ProductRevenues(tfm: TempFileManager, it: Iterator[ProductRevenue])
 extends Combinable[ProductRevenues] with LazyLogging {
+  import Utils._
 
-  def iterator = {
+  private val source = {
+    val file = tfm.getNewFile
+    logger.debug(s"Serializing ProductRevenues to: $file")
+    Utils.withPrinter(file, printer => {
+      it.foreach(x => {
+        printer.println(x.serialize)
+      })
+    })
+    logger.debug(s"Done serializing ProductRevenues to: $file")
+    Source.fromFile(file)
+  }
+
+  def iterator(): Iterator[ProductRevenue] = {
     logger.debug("Creating new ProductRevenues iterator")
-    aggregate.iterator
+    source.reset.getLines.map(ProductRevenue.parse(_))
   }
 
   def combine(other: ProductRevenues) : ProductRevenues = {
     val combined = new IteratorCombinator(iterator, other.iterator)
-    new ProductRevenues(combined.toArray)
+    new ProductRevenues(tfm, combined)
   }
 
-  def groupByStore: Map[StoreId, ProductRevenues] = {
-    aggregate.groupBy(_.storeId).mapValues(new ProductRevenues(_))
-  }
+  // def groupByStore: Map[StoreId, ProductRevenues] = {
+  //   aggregate.groupBy(_.storeId).mapValues(x => new ProductRevenues(x.iterator))
+  // }
+
 
   def combineByProduct: ProductRevenues = {
-    groupByStore
-      .values
-      .map(_.iterator.map(_.copy(storeId = StoreId(""))))
-      .map(q => new ProductRevenues(q.toArray))
-      .reduce(_.combine(_))
+    implicit val ord: Ordering[ProductRevenue] = Ordering.by(_.productId)
+    val it = iterator |> sortedExternally[ProductRevenue](tfm) |> ProductQties.groupAndSum[ProductRevenue]
+    new ProductRevenues(tfm, it)
   }
 
+  // def combineByProduct: ProductRevenues = {
+  //   groupByStore
+  //     .values
+  //     .map(_.iterator.map(_.copy(storeId = StoreId(""))))
+  //     .map(q => new ProductRevenues(q))
+  //     .reduce(_.combine(_))
+  // }
+
   def getTop(n: Int) = {
-    aggregate.sortBy(- _.value).take(n).iterator
+    (iterator |> externalSortBy(tfm, - _.value)).take(n)
   }
+
+  def getTopByStore(n: Int): Map[StoreId, Iterator[ProductRevenue]] = {
+
+    // For some reason I get a 'diverging implicit expansion for Ordering[(StoreId, Int)]'
+    // so I manually define an ordering here.
+    // val ord3 = implicitly[Ordering[(StoreId, Int)]]
+    implicit object Ord extends Ordering[ProductRevenue] {
+      def compare(x: ProductRevenue, y: ProductRevenue): Int = {
+        val ord1 = implicitly[Ordering[StoreId]]
+        val ord2 = implicitly[Ordering[BigDecimal]]
+        val c1 = ord1.compare(x.storeId, y.storeId)
+        if (c1 == 0) {
+          ord2.compare(y.value, x.value)
+        } else c1
+      }
+    }
+
+    val sorted = (iterator |> sortedExternally(tfm)).buffered
+    var map = Map[StoreId, Iterator[ProductRevenue]]()
+    while (sorted.hasNext) {
+      val key = sorted.head.storeId
+      var count = 0
+      var top = Vector[ProductRevenue]() // Using a vector because we assume n is small.
+
+      // Take the first n values for the current store.
+      do {
+        val n = sorted.next
+        top = top :+ n
+        count += 1
+      } while (sorted.hasNext && sorted.head.storeId == key && count < n)
+
+      // Add those values to the map
+      map = map + (key -> top.iterator)
+
+      // Drop remaining values until we reach the next store.
+      while (sorted.hasNext && sorted.head.storeId == key) {sorted.next}
+    }
+    map
+  }
+
 }
 
 object ProductRevenues extends LazyLogging {
-  def apply(tfm: TempFileManager, dataSource: String => Try[Source], productQties: ProductQties)
-  : ProductRevenues = {
+
+  def apply(tfm: TempFileManager,
+            dataSource: String => Try[Source],
+            productQties: ProductQties) : ProductRevenues = {
+
     val joined = new Iterator[Option[ProductRevenue]] {
       private val it = productQties.iterator
       private var refSource: Option[(StoreId, Iterator[Reference])] = None
@@ -357,9 +464,6 @@ object ProductRevenues extends LazyLogging {
       }
     }
 
-    logger.info("Starting serializing ProductRevenues")
-    val a = joined.filter(!_.isEmpty).map(_.get).toArray
-    logger.info("Done serializing ProductRevenues")
-    new ProductRevenues(a) // TODO serialize this iterator into a file instead of an array.
+    new ProductRevenues(tfm, joined.filter(!_.isEmpty).map(_.get))
   }
 }
