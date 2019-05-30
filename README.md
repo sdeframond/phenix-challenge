@@ -26,7 +26,7 @@ Once unzipped, you can run the program with a limited heap size like this:
 
 ## Load Test
 
-You can generate a big amount of data with the script under `generator`. Change the hardcoded values in `generator/app.scala` if needed then run:
+You can generate a big amount of data with the script under `generator`. Change the hardcoded values in `generator/generator.scala` if needed then run:
 
 `sbt run`
 

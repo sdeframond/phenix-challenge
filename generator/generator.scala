@@ -9,26 +9,39 @@ import java.time.{LocalDate, LocalDateTime}
 import scala.util.Random
 
 object Main extends App with LazyLogging {
+
+  ////////////////////////////////
+  //   CHANGE THIS AS NEEDED.   //
+  ////////////////////////////////
+  val startDate = LocalDate.parse("2019-03-15")
   object numberOf {
-    val stores = 100
-    val txPerDays = 10 * 1000
-    val references = 1 * 100 * 1000
+    val stores = 3000
+    val txPerDays = 1000 * 1000
+    // val references = 10 * 1000 * 1000
+    val references = 500 * 1000
     val days = 7
   }
-  val startDate = LocalDate.parse("2019-03-15")
+  ////////////////////////////////
+
   val random = new Random(123)
 
+  logger.debug("START generating store IDs")
   val storeIds = (1 to numberOf.stores)
-    .map(_ => random.alphanumeric.take(20).mkString)
+    .map(_ => random.alphanumeric.take(36).mkString)
     .toArray
+  logger.debug("DONE generating store IDs")
 
   for {day <- (0 to (numberOf.days - 1)).toList.map(startDate.minusDays(_)) } {
-    logger.info(s"Generating data for day: $day")
+    logger.debug(s"START generating data for day: $day")
     generateTransactions(day)
-    storeIds.foreach(generateReferences(day, _))
+    storeIds.foreach(sid => {
+      generateReferences(day, sid)
+    })
+    logger.debug(s"DONE generating data for day: $day")
   }
 
   def generateTransactions(day: LocalDate) = {
+    logger.debug(s"START generating transactions for day: $day")
     val dayString = formatDate(day)
     withPrinter(s"transactions_$dayString") { printer =>
       for (txId <- 1 to numberOf.txPerDays) {
@@ -40,17 +53,25 @@ object Main extends App with LazyLogging {
         printer.println(s"$txId|$dateString+0100|$storeId|$productId|$qty")
       }
     }
+    logger.debug(s"DONE generating transactions for day: $day")
   }
 
   def generateReferences(day: LocalDate, storeId: String) {
     val dayString = formatDate(day)
+    val priceChoices = Array("10.00", "20.00", "321.32")
     withPrinter(s"reference_prod-${storeId}_${dayString}") { printer =>
+      val str = new StringBuilder()
       for (productId <- 1 to numberOf.references) {
-        val price = BigDecimal
-          .decimal(random.nextFloat * 100)
-          .setScale(2, BigDecimal.RoundingMode.DOWN)
-        printer.println(s"$productId|$price")
+
+        // Faster than generating truly random prices
+        val price = priceChoices(productId % priceChoices.size)
+
+        str.append(productId)
+        str.append("|")
+        str.append(price)
+        str.append("\n")
       }
+      printer.print(str)
     }
   }
 
