@@ -20,19 +20,11 @@ case class ProductId(id: Int) extends Ordered[ProductId] {
 case class Reference(productId: ProductId, price: BigDecimal)
 
 object Reference {
-  def parse(string: String): Try[Reference] = {
-    try {
-      string match {
-        case regex(pid, price) =>
-          Success(Reference
-            ( ProductId(pid.toInt)
-            , BigDecimal(price)
-            )
-          )
-        case _ => Failure(new Exception(s"Failed to parse: $string"))
-      }
-    } catch {
-      case e: Throwable => Failure(e)
+  def parse(string: String): Reference = {
+    string match {
+      case regex(pid, price) =>
+        Reference(ProductId(pid.toInt), BigDecimal(price))
+      case _ => throw new Exception(s"Failed to parse: $string")
     }
   }
 
