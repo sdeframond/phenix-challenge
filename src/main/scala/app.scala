@@ -9,8 +9,8 @@ import java.time.{LocalDate, LocalDateTime}
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
 
-import model._
-import aggregate.{Aggregate, ProductValue, TempFileManager}
+import model.ProductValue
+import aggregate.{Aggregate, TempFileManager}
 
 object Main extends App with LazyLogging {
   if(args.length < 2) {
@@ -78,7 +78,7 @@ object Main extends App with LazyLogging {
     logger.debug(s"Serializing to file: $fileName")
     using(new FileWriter(fileName)) {
       writer => using(new PrintWriter(writer)) {
-        printer => top100.foreach(line => printer.println(s"${line.productId.id}|${line.value}"))
+        printer => top100.foreach(l => printer.println(l.serialize))
       }
     }
   }

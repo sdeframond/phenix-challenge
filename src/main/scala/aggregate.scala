@@ -8,7 +8,6 @@ import scala.util.{Failure, Success, Try}
 import scala.io.Source
 
 import PhenixChallenge.model._
-import PhenixChallenge.combine._
 
 class TempFileManager extends LazyLogging {
   private var files: List[File] = List()
@@ -51,7 +50,7 @@ class Aggregate
   }
 
   def merge(other: Aggregate): Aggregate = {
-    new Aggregate(tfm, IteratorCombinator.combine(data, other.data))
+    new Aggregate(tfm, sortedConcatenateAndCombine(data, other.data))
   }
 
   def getTopQties(n: Int): Iterator[ProductQty] = {
@@ -118,7 +117,6 @@ class Aggregate
     }
     map
   }
-
 }
 
 object Aggregate extends LazyLogging {
@@ -233,61 +231,64 @@ object Aggregate extends LazyLogging {
         Source.fromFile(file).getLines.map(parse(_))
       })
 
-    parts.reduce((x, y) => new IteratorKMerger(x, y))
-  }
-}
-
-case class ProductDatum(storeId: StoreId,
-                        productId: ProductId,
-                        qty: Int,
-                        revenueOption: Option[BigDecimal]) extends Combinable[ProductDatum]
-                                                         with Ordered[ProductDatum]
-                                                         with Serializable {
-  def toQty: ProductQty = ProductQty(storeId, productId, qty)
-
-  def toRevenue: Option[ProductRevenue] = {
-    revenueOption.map(revenue => ProductRevenue(storeId, productId, revenue))
+    parts.reduce(sortedConcatenate(_, _))
   }
 
-  def combine(other: ProductDatum): ProductDatum = {
-    val newPriceOption = revenueOption.flatMap(a => other.revenueOption.map(b => a + b))
-    ProductDatum(storeId, productId, qty + other.qty, newPriceOption)
-  }
-
-  def compare(other: ProductDatum): Int = {
-    (storeId, productId).compare(other.storeId, other.productId)
-  }
-
-  def serialize: String = {
-    val priceStr = revenueOption match {
-      case Some(price) => price.toString
-      case None => ProductDatum.noneString
+  // Takes two sorted iterators and concatenate them so that the ouput iterator
+  // is sorted as well,
+  // When two elements are ordered at the same position, they are combined.
+  private def sortedConcatenateAndCombine[T <: Combinable[T]](_xs: Iterator[T], _ys: Iterator[T])
+                                                     (implicit ord: Ordering[T])
+                                                     : Iterator[T]
+                                                     = new Concatenator(_xs, _ys) {
+    def lowerThan: T = xs.next
+    def greaterThan: T = ys.next
+    def equal: T = {
+      val res = xs.head.combine(ys.head)
+      xs.next()
+      ys.next()
+      res
     }
-    s"${storeId.id}|${productId.id}|$qty|$priceStr"
   }
-}
 
-object ProductDatum {
-  implicit def parse(str: String): ProductDatum = {
-    val parts = str.split("""\|""")
-    val price = if (parts(3) == noneString) {
-      None
-    } else {
-      Some(BigDecimal(parts(3)))
+  // Takes two sorted iterators and concatenate them so that the ouput iterator
+  // is sorted as well,
+  private def sortedConcatenate[T](_xs: Iterator[T], _ys: Iterator[T])
+                          (implicit ord: Ordering[T])
+                          : Iterator[T]
+                          = new Concatenator(_xs, _ys) {
+    def lowerThan: T = xs.next
+    def greaterThan: T = ys.next
+    def equal: T = xs.next
+  }
+
+  private abstract class Concatenator[T](_xs: Iterator[T], _ys: Iterator[T])
+                    (implicit ord: Ordering[T]) extends Iterator[T]{
+    protected val xs = _xs.buffered
+    protected val ys = _ys.buffered
+
+    def hasNext = xs.hasNext || ys.hasNext
+
+    def next() = (xs.hasNext, ys.hasNext) match {
+      case (true, true) => {
+        val x = xs.head
+        val y = ys.head
+        val comp = ord.compare(x, y)
+        if (comp < 0) {
+          lowerThan
+        } else if (comp > 0) {
+          greaterThan
+        } else {
+          equal
+        }
+      }
+      case (true, false) => xs.next
+      case (false, true) => ys.next
+      case (false, false) => ys.next // This should throw an error
     }
-    ProductDatum(StoreId(parts(0)), ProductId(parts(1).toInt), parts(2).toInt, price)
+
+    def lowerThan: T
+    def greaterThan: T
+    def equal: T
   }
-
-  private val noneString = "None"
 }
-
-trait ProductValue[T] {
-  val productId: ProductId
-  val value: T
-}
-
-case class ProductQty(storeId: StoreId, productId: ProductId, value: Int)
-extends ProductValue[Int]
-
-case class ProductRevenue(storeId: StoreId, productId: ProductId, value: BigDecimal)
-extends ProductValue[BigDecimal]
