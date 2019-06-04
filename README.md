@@ -1,6 +1,6 @@
 # Phenix Challenge
 
-This my take at Carrefour's [Phenix Challenge](https://github.com/Carrefour-Group/phenix-challenge), just for fun !
+This is my take at Carrefour's [Phenix Challenge](https://github.com/Carrefour-Group/phenix-challenge), just for fun !
 
 Here is an [overview of the algorithm](ALGORITHM.md) implemented.
 
