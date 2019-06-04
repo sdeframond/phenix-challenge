@@ -28,38 +28,18 @@ and be paralellizable
 
 # Algorithm
 
-For the last day:
+For each day:
+  - Load and sort transactions
+  - select sum(quantity) from transactions group by (storeId, productId)
+    + Note that this can be done in a single scan since we sorted the transactions previously
+  - join with each store references to get the revenue
+    + Since evething is sorted, this is again a single scan
+    + We assume reference files are sorted by productId
+  - Store the resulting daily aggregate into a file
 
-  Split transactions file per store into tmp files.
+The for the last day:
+  - Find the overall best sellers by quantity and by revenue.
+  - Sort by (storeId, quantity) and find the best sellers for each store.
+  - Sort by (storeId, revenue) and find the best sellers for each store.
 
-  For each store:
-    - sum quantities by product. Sort by product id.
-      - productQties_<STORE_ID>_YYYYMMDD.tmp.data
-    - join the results with the price references
-      - productRevenues_<STORE_ID>_YYYYMMDD.tmp.data
-    - From these temporary files, produce:
-      - top_100_ventes_<ID_MAGASIN>_YYYYMMDD.data
-      - top_100_ca_<ID_MAGASIN>_YYYYMMDD.data
-
-  Merge the files above into 2 additional temporary files
-    - productQties_GLOBAL_YYYYMMDD.tmp.data
-    - productRevenues_GLOBAL_YYYYMMDD.tmp.data
-
-  And sort them by quantity and revenues to get:
-    - top_100_ventes_GLOBAL_YYYYMMDD.data
-    - top_100_ca_GLOBAL_YYYYMMDD.data
-
-Then for each of the 6 previous days, produce the same temporary files and
-incrementally merge them with the previous ones. Delete the temporary files
-of the day once merged.
-
-Then get the final result per store from the temporary files
-  - top_100_ventes_<ID_MAGASIN>_YYYYMMDD-J7.data
-  - top_100_ca_<ID_MAGASIN>_YYYYMMDD-J7.data
-
-Then merge the temporary files to get the overall final results:
-  - top_100_ventes_GLOBAL_YYYYMMDD-J7.data
-  - top_100_ca_GLOBAL_YYYYMMDD-J7.data.
-
-Note that each merge, sum and sort operation may be implemented using an
-external memory algorithm (for example using map reduce) for better scalability.
+Then merge each daily aggregate for the 7 days into one and get the best sellers again.
